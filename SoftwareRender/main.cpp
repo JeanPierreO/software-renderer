@@ -1,6 +1,5 @@
 #include <cmath>
 #include <tuple>
-#include "FileReader.h"
 #include "tgaimage.h"
 #include "Structs/Vec3.h"
 #include <iostream>
@@ -25,7 +24,9 @@ vector<float> projection_transform(vector<float> vertex)
     vertex_transformed.push_back(x_new);
     float y_new = (vertex[1]+ 1.) * width / 2;
     vertex_transformed.push_back(y_new);
-
+    float z_new = (vertex[2]+ 1.) * 255. / 2;
+    vertex_transformed.push_back(z_new);
+    
     return vertex_transformed;
 }
 vector<pair<float,float>> line(float ax, float ay, float bx, float by, TGAImage& buf,const TGAColor &c, vector<pair<float,float>>& vertices){
@@ -114,7 +115,39 @@ double signed_triangle_area(int ax, int ay, int bx, int by, int cx, int cy) {
     return .5*((by-ay)*(bx+ax) + (cy-by)*(cx+bx) + (ay-cy)*(ax+cx));
 }
 
-void triangle_boundingbox(int ax, int ay, int bx, int by, int cx, int cy, TGAImage &framebuffer, TGAColor color)
+void triangle(int ax, int ay, int az, int bx, int by, int bz, int cx, int cy, int cz, TGAImage& zDepthBuffer, TGAImage &framebuffer, TGAColor color)
+{
+    //4,10 - 10,20 x1,y1 x2,y2
+    int boundingBoxMinX = min(min(ax, bx), cx);
+    int boundingBoxMinY = min(min(ay, by), cy);
+    int boundingBoxMaxX = max(max(ax, bx), cx);
+    int boundingBoxMaxY = max(max(ay, by), cy);
+
+    double total_area = signed_triangle_area(ax, ay, bx, by, cx, cy);
+
+    if (total_area<1) return;
+    
+    for (int x = boundingBoxMinX; x<= boundingBoxMaxX; x++)
+    {
+        for (int y = boundingBoxMinY; y <= boundingBoxMaxY; y++)
+        {
+            double alpha = signed_triangle_area(x, y, bx, by, cx, cy)/ total_area;
+            double beta = signed_triangle_area(x, y, cx, cy, ax, ay)/ total_area;
+            double gamma = signed_triangle_area(x, y, ax, ay, bx, by) / total_area;
+
+            if (alpha<0 || beta<0 || gamma<0) continue;
+
+            unsigned char z = static_cast<unsigned char>(alpha * az + beta * bz + gamma * cz);
+
+            if (z <= zDepthBuffer.get(x,y)[0]) continue;
+
+            zDepthBuffer.set(x,y,{z});
+            framebuffer.set(x, y, color);
+        }
+    }
+}
+
+void triangle_interprolation(int ax, int ay,int bx, int by, int cx, int cy, TGAImage &framebuffer, Vec3 rChannel, Vec3 gChannel, Vec3 bChannel, float threshold)
 {
     //4,10 - 10,20 x1,y1 x2,y2
     int boundingBoxMinX = min(min(ax, bx), cx);
@@ -135,16 +168,26 @@ void triangle_boundingbox(int ax, int ay, int bx, int by, int cx, int cy, TGAIma
             double gamma = signed_triangle_area(x, y, ax, ay, bx, by) / total_area;
 
             if (alpha<0 || beta<0 || gamma<0) continue;
+
+            if (alpha > threshold && beta > threshold && gamma > threshold) continue;
+            
+            //double combined = (alpha * x + beta * x + gamma * x) / threshold;
+            
+            unsigned char rChannelz = static_cast<unsigned char>(alpha * rChannel.x + beta * rChannel.y + gamma * rChannel.z);
+            unsigned char gChannelz = static_cast<unsigned char>(alpha * gChannel.x + beta * gChannel.y + gamma * gChannel.z);
+            unsigned char bChannelz = static_cast<unsigned char>(alpha * bChannel.x + beta * bChannel.y + gamma * bChannel.z);
+
+            TGAColor color = {rChannelz, gChannelz, bChannelz};
             
             framebuffer.set(x, y, color);
         }
     }
     
-    vector<pair<float,float>> verticesOfTriangle;
-    
-    line(ax, ay, bx, by, framebuffer, color, verticesOfTriangle);
-    line(bx, by, cx, cy, framebuffer, color, verticesOfTriangle);
-    line(cx, cy, ax, ay, framebuffer, color, verticesOfTriangle);
+    // vector<pair<float,float>> verticesOfTriangle;
+    //
+    // line(ax, ay, bx, by, framebuffer, color, verticesOfTriangle);
+    // line(bx, by, cx, cy, framebuffer, color, verticesOfTriangle);
+    // line(cx, cy, ax, ay, framebuffer, color, verticesOfTriangle);
 }
 
 TGAColor GetRandomColor()
@@ -160,7 +203,7 @@ TGAColor GetRandomColor()
     };
 }
 
-void processModelData(TGAImage& framebuffer)
+void processModelData(TGAImage& framebuffer, TGAImage& zDepthBuffer)
 {
     Model model("./diablo3_pose.obj");
 
@@ -178,19 +221,28 @@ void processModelData(TGAImage& framebuffer)
         vector<float> v2_transformed = projection_transform(v2);
         vector<float> v3_transformed = projection_transform(v3);
         
-        triangle_boundingbox(v1_transformed[0], v1_transformed[1], v2_transformed[0], v2_transformed[1], v3_transformed[0], v3_transformed[1],framebuffer, GetRandomColor());
+        triangle(v1_transformed[0], v1_transformed[1], v1_transformed[2], v2_transformed[0], v2_transformed[1], v2_transformed[2], v3_transformed[0], v3_transformed[1], v3_transformed[2], zDepthBuffer, framebuffer, GetRandomColor());
     }
+
+    framebuffer.write_tga_file("framebuffer.tga");
+    zDepthBuffer.write_tga_file("zDepthBuffer.tga");
 }
 
 int main(int argc, char** argv)
 {
     TGAImage framebuffer(width, height, TGAImage::RGB);
-
-    // triangle_boundingbox(  7, 45, 35, 100, 45,  60, framebuffer, red);
-    // triangle_boundingbox(120, 35, 90,   5, 45, 110, framebuffer, white);
-    // triangle_boundingbox(115, 83, 80,  90, 85, 120, framebuffer, green);
-        
-    processModelData(framebuffer);
-    framebuffer.write_tga_file("framebuffer.tga");
+    TGAImage zDepthBuffer(width, height, TGAImage::GRAYSCALE);
+    // int ax = 17, ay =  4, az =  24;
+    // int bx = 55, by = 39, bz = 166;
+    // int cx = 23, cy = 59, cz = 122;
+    //
+    // Vec3 rChannel = Vec3(255, 0.0, 0.0);
+    // Vec3 gChannel = Vec3(0.0, 255.0, 0.0);
+    // Vec3 bChannel = Vec3(0.0, 0.0, 255.0);
+    //
+    // triangle_interprolation(ax, ay, bx, by, cx, cy, framebuffer, rChannel, gChannel, bChannel, 0.1);
+    processModelData(framebuffer, zDepthBuffer);
+   
+    //framebuffer.write_tga_file("framebuffer.tga");
     return 0;
 }
